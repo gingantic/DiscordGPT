@@ -14,8 +14,7 @@ from websockets.exceptions import *
 uptime = time.time()
 USERNAME_BOT = None
 USER_AGENT = 'DiscordBot (Gingantic, 0.1)'
-TOKEN = "MTExMTY4MzEwNzE3MTYxNDgyMQ.GjhJbQ.tni-WZY8vuPJC84o-zfRcgnB5CeFpMZehsDlQY"
-# TOKEN = "Mzk5NTQxNTkxNDYwNTQ0NTE0.GXZC7b.UjIz3CKn9P3nGC84e1oY79FWwUSnHEupRukiHc"
+TOKEN = "MTExMTY4MzEwNzE3MTYxNDgyMQ.GjYMTu.UmOioEHl96Me3OVP0bN3PZY0LpSzoKnaM6dchs"
 GATEAWAY_URL = 'wss://gateway.discord.gg/?v=10&encoding=json&compress=zlib-stream'
 API_URL = 'https://discord.com/api/v10/'
 RESUME_STATUS = False
