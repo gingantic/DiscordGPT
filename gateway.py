@@ -250,7 +250,7 @@ async def handle_message(ws, message_data):
         elif ">chat_enable" == content and author == "gingantic":
             ENABLE_CHAT_GPT = True
             await send_message(channel_id, "GPT is enabled")
-        elif [">chat",">ask"] in split_content[0]:
+        elif [">chat",">ask",">askchat"] in split_content[0]:
             if not limiter.call():
                 await send_message(channel_id,"Rate limiter aktif, tunggu beberapa saat")
                 return
