@@ -20,7 +20,7 @@ API_URL = 'https://discord.com/api/v10/'
 RESUME_STATUS = False
 SET_INTENT = 3276799
 INTERVAL_HEARTBEAT = None
-CHAT_GPT_ENDPOINT = "http://vps.gins.my.id:1337/chat/completions"
+CHAT_GPT_ENDPOINT = "http://localhost:1337/chat/completions"
 CHAT_GPT_DIALOG = None
 CHAT_GPT_SAVE_PATH = "historygpt.json"
 CHAT_GPT_TEMPLATE_USER = None
@@ -109,7 +109,7 @@ def get_datetime():
 async def connect_to_gateway():
     async with websockets.connect(GATEAWAY_URL) as ws:
         try:
-            while True:
+            while ws.open:
                 recv = await ws.recv()
                 payload = await decompress_data(recv)
                 opcode = payload.op
@@ -139,8 +139,6 @@ async def connect_to_gateway():
                     await handle_event(ws, name, data)
                 elif opcode is None:
                     print('Opcode is None')
-                    await ws.close()
-                    await connect_to_gateway()
         except ConnectionClosedError as e:
             print(f'[{get_datetime()}] Connection error closed with code: {e.code} and reason: {e.reason}')
             traceback.print_exc()
@@ -249,7 +247,7 @@ async def handle_message(ws, message_data):
         elif ">chat_enable" == content and author == "gingantic":
             ENABLE_CHAT_GPT = True
             await send_message(channel_id, "GPT is enabled")
-        elif [">chat",">ask",">askchat"] in split_content[0]:
+        elif split_content[0] in [">chat",">ask",">askchat"]:
             if not limiter.call():
                 await send_message(channel_id,"Rate limiter aktif, tunggu beberapa saat")
                 return
