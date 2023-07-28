@@ -14,7 +14,7 @@ from websockets.exceptions import *
 uptime = time.time()
 USERNAME_BOT = None
 USER_AGENT = 'DiscordBot (Gingantic, 0.1)'
-TOKEN = "MTExMTY4MzEwNzE3MTYxNDgyMQ.GjYMTu.UmOioEHl96Me3OVP0bN3PZY0LpSzoKnaM6dchs"
+TOKEN = open("token.txt", "r").read()
 GATEAWAY_URL = 'wss://gateway.discord.gg/?v=10&encoding=json&compress=zlib-stream'
 API_URL = 'https://discord.com/api/v10/'
 RESUME_STATUS = False
@@ -30,9 +30,6 @@ HEADER_API = {
     "Content-Type": "application/json",
     "User-Agent": USER_AGENT
 }
-CHANNEL_ID_CLYDE = "1128739121582575696"
-# first array is channel_id, second array is message_id, third array is message
-UNANSWERED_MESSAGE = []
 WHITE_LIST_CHANNEL = ["1028580720655999067","477911432709799936", "521713650302713869"]
 AUTHOR_USERNAME = "gingantic"
 
@@ -233,8 +230,8 @@ async def handle_message(ws, message_data):
                 break
         if not channel_id in WHITE_LIST_CHANNEL:
             return
-        if USERNAME_BOT in str(message_data['mentions']):
-            await send_message(channel_id, f"Halo {name}!", reply_id=message_data['id'])
+        # if USERNAME_BOT in str(message_data['mentions']):
+        #     await send_message(channel_id, f"Halo {name}!", reply_id=message_data['id'])
         if ">uptime" == content:
             uptime_time = time.time() - uptime
             uptime_time_format = str(datetime.timedelta(seconds=uptime_time)).split(".")[0]
