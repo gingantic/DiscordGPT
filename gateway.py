@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import dataclass
 import datetime
 import time
+from time import sleep
 import traceback
 import zlib
 import websockets
@@ -14,7 +15,7 @@ from websockets.exceptions import *
 uptime = time.time()
 USERNAME_BOT = None
 USER_AGENT = 'DiscordBot (Gingantic, 0.1)'
-TOKEN = open("token.txt", "r").read()
+TOKEN = open("token.txt", "r").read().split("\n")[0]
 GATEAWAY_URL = 'wss://gateway.discord.gg/?v=10&encoding=json&compress=zlib-stream'
 API_URL = 'https://discord.com/api/v10/'
 RESUME_STATUS = False
@@ -31,6 +32,7 @@ HEADER_API = {
     "User-Agent": USER_AGENT
 }
 WHITE_LIST_CHANNEL = ["1028580720655999067","477911432709799936", "521713650302713869"]
+#WHITE_LIST_CHANNEL = []
 AUTHOR_USERNAME = "gingantic"
 
 class RateLimiter:
@@ -108,6 +110,9 @@ async def connect_to_gateway():
         try:
             while ws.open:
                 recv = await ws.recv()
+                if not recv:
+                    break
+
                 payload = await decompress_data(recv)
                 opcode = payload.op
                 seq = payload.sequence
@@ -118,43 +123,36 @@ async def connect_to_gateway():
                 
                 if opcode == 10:
                     interval = data['heartbeat_interval'] / 1000
-                    asyncio.create_task(send_heartbeat(ws, interval))
+                    asyncio.ensure_future(send_heartbeat(ws, interval))
                     await send_identify(ws)
                 elif opcode == 11:
                     print('Heartbeat ACK received')
                 elif opcode == 7:
                     print('Reconnect received')
-                    print(payload)
                     await send_message("1028580720655999067", f"OP 7 Reconnect again\nUptime ke - {uptime}")
-                    await ws.close()
-                    await connect_to_gateway()
+                    break
                 elif opcode == 9:
                     print('Invalid session received')
-                    await ws.close()
-                    await connect_to_gateway()
+                    break
                 elif opcode == 0:
                     await handle_event(ws, name, data)
                 elif opcode is None:
                     print('Opcode is None')
+                    
         except ConnectionClosedError as e:
             print(f'[{get_datetime()}] Connection error closed with code: {e.code} and reason: {e.reason}')
             traceback.print_exc()
-            await connect_to_gateway()
 
         except ConnectionClosedOK as e:
             print(f'[{get_datetime()}] Connection closed with code: {e.code} and reason: {e.reason}')
             traceback.print_exc()
-            await connect_to_gateway()
 
         except Exception as e:
             print(f'[{get_datetime()}] Exception: {e}')
-            ws.close()
             traceback.print_exc()
-            await connect_to_gateway()
 
 
 async def send_identify(ws):
-    #"intents": 3276799,
     identify_data = {
         "op": 2,
         "d": {
@@ -162,15 +160,15 @@ async def send_identify(ws):
             "intents": SET_INTENT,
             "properties": {
                 "$os": "linux",
-                "$browser": "my_library",
-                "$device": "my_library"
+                "$browser": "Gins_app",
+                "$device": "Gins_app"
             }
         }
     }
     await ws.send(json.dumps(identify_data))
 
 async def custom_status(ws):
-    while True:
+    while ws.open:
         uptime_time = time.time() - uptime
         uptime_time_format = str(datetime.timedelta(seconds=uptime_time)).split(".")[0]
         payload = {
@@ -190,16 +188,16 @@ async def custom_status(ws):
             }
         }
         await ws.send(json.dumps(payload))
-        await asyncio.sleep(random.randrange(15, 30))
+        await asyncio.sleep(random.randrange(15, 60))
 
 async def send_heartbeat(ws, interval):
-    while True:
+    while ws.open:
         await asyncio.sleep(interval)
-        heartbeat_data = {
+        payload = {
             'op': 1,
             'd': None
         }
-        await ws.send(json.dumps(heartbeat_data))
+        await ws.send(json.dumps(payload))
 
 async def handle_event(ws, event_type, event_data):
     global USERNAME_BOT
@@ -207,16 +205,15 @@ async def handle_event(ws, event_type, event_data):
         print('Ready event received')
         USERNAME_BOT = event_data['user']['username']
         print(USERNAME_BOT)
-        asyncio.create_task(custom_status(ws))
+        asyncio.ensure_future(custom_status(ws))
         await send_message("1028580720655999067", f"Bot lauched")
 
     elif event_type == 'MESSAGE_CREATE':
         await handle_message(ws, event_data)
 
 async def handle_message(ws, message_data):
-    global ENABLE_CHAT_GPT
     try:
-        id_message = message_data['id']
+        message_id = message_data['id']
         author = message_data['author']['username']
         name = message_data['author']['global_name']
         mention_id = message_data['mentions']
@@ -237,13 +234,11 @@ async def handle_message(ws, message_data):
             uptime_time_format = str(datetime.timedelta(seconds=uptime_time)).split(".")[0]
             await send_message(channel_id, f"Uptime: {uptime_time_format}")
         elif ">ping" == content:
-            await send_message(channel_id, "Pong")
+            await send_message(channel_id, "Pong!")
         elif ">chat_disable" == content and author == "gingantic":
-            ENABLE_CHAT_GPT = False
-            await send_message(channel_id, "GPT is disabled")
+            await gpt_status(channel_id, False)
         elif ">chat_enable" == content and author == "gingantic":
-            ENABLE_CHAT_GPT = True
-            await send_message(channel_id, "GPT is enabled")
+            await gpt_status(channel_id, True)
         elif split_content[0] in [">chat",">ask",">askchat"]:
             if not limiter.call():
                 await send_message(channel_id,"Rate limiter aktif, tunggu beberapa saat")
@@ -258,22 +253,40 @@ async def handle_message(ws, message_data):
                     await send_message(channel_id, "GPT Error Fitur di matikan")
                     return
                 if len(res_chat) > 2000:
-                    for i in await chunks_long_message(res_chat,2000):
-                        await send_message(channel_id,i,reply_id=id_message)
+                    for i in chunks_long_message(res_chat,2000):
+                        await send_message(channel_id,i,reply_id=message_id)
                 else:
-                    await send_message(channel_id,res_chat,reply_id=id_message)
+                    await send_message(channel_id,res_chat,reply_id=message_id)
             else:
                 await send_message(channel_id, "Please ask something")
-                
         elif ">limiter" == content:
             remaining_calls = limiter.get_remaining_calls()
             await send_message(channel_id,f"Sisa pengunaan GPT: {remaining_calls}\nakan reset setelah 1 jam")
         elif ">delete" == content and author == "gingantic":
-            # get reply message and get id
             reply_id = message_data['referenced_message']['id']
             await delete_message(channel_id, reply_id)
+        elif ">reload_dialog" == content and author == "gingantic":
+            load_dialog_gpt()
+            await send_message(channel_id, "Dialog reloaded")
+        elif ">change_model" in content and author == "gingantic":
+            model_name = content.split(" ")[1]
+            if CHAT_GPT_DIALOG['model'] == model_name:
+                await send_message(channel_id, "Model sama")
+                return
+            else:
+                CHAT_GPT_DIALOG['model'] = model_name
+                save_dialog_gpt()
+                await send_message(channel_id, f"Model changed to {model_name}")
     except KeyError:
         pass
+
+async def gpt_status(channel_id, status: bool):
+    global ENABLE_CHAT_GPT
+    ENABLE_CHAT_GPT = status
+    if status:
+        await send_message(channel_id, "GPT is Enabled")
+    else:
+        await send_message(channel_id, "GPT is Disabled")
 
 async def send_message(channel_id, content, reply_id=None):
     print(f'Sending message: {content}')
@@ -304,7 +317,7 @@ async def ask_gpt(message):
     global ENABLE_CHAT_GPT
     temp_ask = json.loads('{"role": "user", "content": ""}')
     temp_ask["content"] = message
-    await update_dialog_gpt(temp_ask)
+    update_dialog_gpt(temp_ask)
     print(json.dumps(CHAT_GPT_DIALOG, indent=4))
     header = {"Content-Type": "application/json"}
     rq = requests.post(CHAT_GPT_ENDPOINT, headers=header, json=CHAT_GPT_DIALOG)
@@ -315,25 +328,25 @@ async def ask_gpt(message):
     data = rq.json()
     resp = data["choices"][0]["message"]
     content = resp["content"]
-    await update_dialog_gpt(resp)
-    await save_dialog_gpt()
+    update_dialog_gpt(resp)
+    save_dialog_gpt()
     print("\n\n"+json.dumps(CHAT_GPT_DIALOG,indent=4))
     return content
 
-async def load_dialog_gpt():
+def load_dialog_gpt():
     global CHAT_GPT_DIALOG
     with open(CHAT_GPT_SAVE_PATH, "r") as f:
         CHAT_GPT_DIALOG = json.load(f)
 
-async def save_dialog_gpt():
+def save_dialog_gpt():
     with open(CHAT_GPT_SAVE_PATH, "w") as f:
         json.dump(CHAT_GPT_DIALOG, f, indent=4)
 
-async def update_dialog_gpt(data):
+def update_dialog_gpt(data):
     global CHAT_GPT_DIALOG
     CHAT_GPT_DIALOG["messages"].append(data)
 
-async def chunks_long_message(message, max_characters):
+def chunks_long_message(message, max_characters):
     words = message.split()
     chunks = []
     current_chunk = ""
@@ -351,9 +364,15 @@ async def chunks_long_message(message, max_characters):
     return chunks
 
 async def main():
-    await load_dialog_gpt()
-    await connect_to_gateway()
+    try:
+        await connect_to_gateway()
+    except:
+        pass
 
 if __name__ == '__main__':
-    asyncio.run(main())
-    asyncio.run(send_message("1028580720655999067", f"Bot dead at {get_datetime()}"))
+    load_dialog_gpt()
+    while True:
+        asyncio.run(main())
+        asyncio.run(send_message("1028580720655999067", f"Bot dead at {get_datetime()}"))
+        print("Reconnecting in 2 seconds")
+        sleep(2)
