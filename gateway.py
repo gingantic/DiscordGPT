@@ -136,8 +136,6 @@ async def connect_to_gateway():
                     break
                 elif opcode == 0:
                     await handle_event(ws, name, data)
-                elif opcode is None:
-                    print('Opcode is None')
                     
         except ConnectionClosedError as e:
             print(f'[{get_datetime()}] Connection error closed with code: {e.code} and reason: {e.reason}')
