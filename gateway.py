@@ -2,7 +2,6 @@ import asyncio
 from dataclasses import dataclass
 import datetime
 import time
-from time import sleep
 import traceback
 import zlib
 import websockets
@@ -15,8 +14,11 @@ from websockets.exceptions import *
 uptime = time.time()
 USERNAME_BOT = None
 USER_AGENT = 'DiscordBot (Gingantic, 0.1)'
-TOKEN = open("token.txt", "r").read().split("\n")[0]
-GATEAWAY_URL = 'wss://gateway.discord.gg/?v=10&encoding=json&compress=zlib-stream'
+ENABLE_COMPRESS = True
+# u can change the token.key with token.txt if u want
+TOKEN = open("token.key", "r").read().split("\n")[0]
+#GATEAWAY_URL = 'wss://gateway.discord.gg/?v=10&encoding=json&compress=zlib-stream'
+GATEAWAY_URL = 'wss://gateway.discord.gg/?v=10&encoding=json'
 API_URL = 'https://discord.com/api/v10/'
 RESUME_STATUS = False
 SET_INTENT = 3276799
@@ -34,6 +36,7 @@ HEADER_API = {
 WHITE_LIST_CHANNEL = ["1028580720655999067","477911432709799936", "521713650302713869"]
 #WHITE_LIST_CHANNEL = []
 AUTHOR_USERNAME = "gingantic"
+ASYNCLIST = []
 
 class RateLimiter:
     def __init__(self, max_calls, time_period):
@@ -63,29 +66,6 @@ class RateLimiter:
 
 limiter = RateLimiter(max_calls=10, time_period=3600)
 
-@dataclass
-class GatewayMessage():
-    op: int
-    data: object
-    sequence: int
-    name: str
-
-def _GateMsg(msg):
-    obj = json.loads(msg) 
-    op = None
-    data = None
-    seq = None
-    name = None
-    if "op" in obj:
-        op = obj["op"]
-    if "d" in obj:
-        data = obj["d"]
-    if "s" in obj:
-        seq = obj["s"]
-    if "t" in obj:
-        name = obj["t"]
-    return GatewayMessage(op, data, seq, name)
-
 ZLIB_SUFFIX = b'\x00\x00\xff\xff'
 buffer = bytearray()
 inflator = zlib.decompressobj()
@@ -93,37 +73,45 @@ inflator = zlib.decompressobj()
 async def decompress_data(msg):
     global buffer
     try:
+        if not msg:
+            return None
         buffer.extend(msg)
         if len(msg) < 4 or msg[-4:] != ZLIB_SUFFIX:
             return None
         msg = inflator.decompress(buffer)
         buffer = bytearray()
-        return _GateMsg(msg)
+        return json.loads(msg)
     except Exception as e:
-        return _GateMsg("{}")
+        return None
 
 def get_datetime():
     return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+async def waited_close():
+    for task in ASYNCLIST:
+        task.cancel()
+    asyncio.gather(*ASYNCLIST)
 
 async def connect_to_gateway():
     async with websockets.connect(GATEAWAY_URL) as ws:
         try:
             while ws.open:
-                recv = await ws.recv()
-                if not recv:
+                # recv = await ws.recv()
+                # payload = await decompress_data(recv)
+                payload = json.loads(await ws.recv())
+                if not payload:
                     break
 
-                payload = await decompress_data(recv)
-                opcode = payload.op
-                seq = payload.sequence
-                data = payload.data
-                name = payload.name
+                opcode = payload['op']
+                seq = payload['s']
+                data = payload['d']
+                name = payload['t']
 
-                print(f"{get_datetime()} - {payload.op}")
+                print(f"{get_datetime()} - {opcode}")
                 
                 if opcode == 10:
                     interval = data['heartbeat_interval'] / 1000
-                    asyncio.ensure_future(send_heartbeat(ws, interval))
+                    ASYNCLIST.append(asyncio.ensure_future(send_heartbeat(ws, interval)))
                     await send_identify(ws)
                 elif opcode == 11:
                     print('Heartbeat ACK received')
@@ -139,15 +127,16 @@ async def connect_to_gateway():
                     
         except ConnectionClosedError as e:
             print(f'[{get_datetime()}] Connection error closed with code: {e.code} and reason: {e.reason}')
-            traceback.print_exc()
 
         except ConnectionClosedOK as e:
             print(f'[{get_datetime()}] Connection closed with code: {e.code} and reason: {e.reason}')
-            traceback.print_exc()
 
         except Exception as e:
             print(f'[{get_datetime()}] Exception: {e}')
             traceback.print_exc()
+
+        await ws.close()
+    await waited_close()
 
 
 async def send_identify(ws):
@@ -167,35 +156,77 @@ async def send_identify(ws):
 
 async def custom_status(ws):
     while ws.open:
-        uptime_time = time.time() - uptime
-        uptime_time_format = str(datetime.timedelta(seconds=uptime_time)).split(".")[0]
-        payload = {
-            "op": 3,
-            "d": {
-                "status": "dnd",
-                "since": 0,
-                "activities": [
-                    {
-                        "name": "Custom Status",
-                        "type": 4,
-                        "state": f"Uptime Test {uptime_time_format}",
-                        "emoji": None
-                    }
-                ],
-                "afk": False
+        try:
+            uptime_time = time.time() - uptime
+            uptime_time_format = str(datetime.timedelta(seconds=uptime_time)).split(".")[0]
+            payload = {
+                "op": 3,
+                "d": {
+                    "status": "dnd",
+                    "since": 0,
+                    "activities": [
+                        {
+                            "name": "Custom Status",
+                            "type": 4,
+                            "state": f"Uptime Test {uptime_time_format}",
+                            "emoji": None
+                        }
+                    ],
+                    "afk": False
+                }
             }
+            await ws.send(json.dumps(payload))
+            await asyncio.sleep(random.randrange(15, 60))
+        except CancelledError:
+            break
+
+async def join_voice_channel(ws, channel_id, guild_id):
+    payload = {
+        "op": 4,
+        "d": {
+            "guild_id": guild_id,
+            "channel_id": channel_id,
+            "self_mute": False,
+            "self_deaf": True
         }
-        await ws.send(json.dumps(payload))
-        await asyncio.sleep(random.randrange(15, 60))
+    }
+    await ws.send(json.dumps(payload))
+
+async def leave_voice_channel(ws, channel_id, guild_id):
+    payload = {
+        "op": 4,
+        "d": {
+            "guild_id": guild_id,
+            "channel_id": None,
+            "self_mute": False,
+            "self_deaf": False
+        }
+    }
+    await ws.send(json.dumps(payload))
+
+async def speak_voice_channel(ws, guild_id, audio):
+    # what the audio
+    # audio = "data:audio/ogg;base64," + base64.b64encode(audio).decode('utf-8')
+    payload = {
+        "op": 5,
+        "d": {
+            "guild_id": guild_id,
+            "audio": audio
+        }
+    }
+    await ws.send(json.dumps(payload))
 
 async def send_heartbeat(ws, interval):
     while ws.open:
-        await asyncio.sleep(interval)
-        payload = {
-            'op': 1,
-            'd': None
-        }
-        await ws.send(json.dumps(payload))
+        try:
+            await asyncio.sleep(interval)
+            payload = {
+                'op': 1,
+                'd': None
+            }
+            await ws.send(json.dumps(payload))
+        except CancelledError:
+            break
 
 async def handle_event(ws, event_type, event_data):
     global USERNAME_BOT
@@ -203,7 +234,7 @@ async def handle_event(ws, event_type, event_data):
         print('Ready event received')
         USERNAME_BOT = event_data['user']['username']
         print(USERNAME_BOT)
-        asyncio.ensure_future(custom_status(ws))
+        ASYNCLIST.append(asyncio.ensure_future(custom_status(ws)))
         await send_message("1028580720655999067", f"Bot lauched")
 
     elif event_type == 'MESSAGE_CREATE':
@@ -219,12 +250,15 @@ async def handle_message(ws, message_data):
         content = message_data['content']
         channel_id = message_data['channel_id']
         split_content = content.split(" ")
+        guild_id = message_data['guild_id']
         for i in mention_id:
             if i['username'] == USERNAME_BOT:
                 first_mention = i
                 break
         if not channel_id in WHITE_LIST_CHANNEL:
             return
+        if author == "gingantic":
+            print(message_data)
         # if USERNAME_BOT in str(message_data['mentions']):
         #     await send_message(channel_id, f"Halo {name}!", reply_id=message_data['id'])
         if ">uptime" == content:
@@ -275,6 +309,13 @@ async def handle_message(ws, message_data):
                 CHAT_GPT_DIALOG['model'] = model_name
                 save_dialog_gpt()
                 await send_message(channel_id, f"Model changed to {model_name}")
+        elif split_content[0] in ">join_vc" and author == "gingantic":
+            if len(split_content) < 2:
+                await send_message(channel_id, "Please provide channel id")
+                return
+            await join_voice_channel(ws, split_content[1], guild_id)
+        elif split_content[0] in ">leave_vc" and author == "gingantic":
+            await leave_voice_channel(ws, channel_id, guild_id)
     except KeyError:
         pass
 
@@ -371,6 +412,5 @@ if __name__ == '__main__':
     load_dialog_gpt()
     while True:
         asyncio.run(main())
-        asyncio.run(send_message("1028580720655999067", f"Bot dead at {get_datetime()}"))
         print("Reconnecting in 2 seconds")
-        sleep(2)
+        time.sleep(2)
