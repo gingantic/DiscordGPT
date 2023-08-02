@@ -1,15 +1,22 @@
 import asyncio
 from dataclasses import dataclass
 import datetime
+import struct
 import time
 import traceback
 import zlib
+import nacl
 import websockets
 import json
 import random
 import requests
 from asyncio import *
 from websockets.exceptions import *
+import socket
+import ffmpeg
+from pydub import AudioSegment
+import opuslib
+from nacl.secret import SecretBox
 
 uptime = time.time()
 USERNAME_BOT = None
@@ -28,6 +35,8 @@ CHAT_GPT_DIALOG = None
 CHAT_GPT_SAVE_PATH = "historygpt.json"
 CHAT_GPT_TEMPLATE_USER = None
 ENABLE_CHAT_GPT = True
+CURRENT_SESSION_ID = None
+USER_ID = None
 HEADER_API = {
     "Authorization": TOKEN,
     "Content-Type": "application/json",
@@ -107,7 +116,7 @@ async def connect_to_gateway():
                 data = payload['d']
                 name = payload['t']
 
-                print(f"{get_datetime()} - {opcode}")
+                print(f"{get_datetime()} - {opcode} || {name}")
                 
                 if opcode == 10:
                     interval = data['heartbeat_interval'] / 1000
@@ -153,6 +162,18 @@ async def send_identify(ws):
         }
     }
     await ws.send(json.dumps(identify_data))
+
+async def send_identify_voice(ws, token, guild_id, session_id, user_id):
+    payload = {
+        "op": 0,
+        "d": {
+            "server_id": guild_id,
+            "user_id": user_id,
+            "session_id": session_id,
+            "token": token
+        }
+    }
+    await ws.send(json.dumps(payload))
 
 async def custom_status(ws):
     while ws.open:
@@ -228,17 +249,164 @@ async def send_heartbeat(ws, interval):
         except CancelledError:
             break
 
+async def send_heartbeat_voice(ws, interval):
+    while ws.open:
+        try:
+            await asyncio.sleep(interval)
+            payload = {
+                'op': 3,
+                'd': None
+            }
+            await ws.send(json.dumps(payload))
+        except CancelledError:
+            break
+
+async def send_speaking(ws, ssrc):
+    payload = {
+        "op": 5,
+        "d": {
+            "speaking": 1,
+            "delay": 0,
+            "ssrc": ssrc
+        }
+    }
+    await ws.send(json.dumps(payload))
+
+async def establish_voice_udp(ws, ip, port, mode):
+    payload = {
+        "op": 1,
+        "d": {
+            "protocol": "udp",
+            "data": {
+                "address": ip,
+                "port": port,
+                "mode": mode
+            }
+        }
+    }
+    await ws.send(json.dumps(payload))
+
 async def handle_event(ws, event_type, event_data):
-    global USERNAME_BOT
+    global USERNAME_BOT, CURRENT_SESSION_ID, USER_ID
     if event_type == 'READY':
         print('Ready event received')
         USERNAME_BOT = event_data['user']['username']
+        CURRENT_SESSION_ID = event_data['session_id']
+        USER_ID = event_data['user']['id']
         print(USERNAME_BOT)
         ASYNCLIST.append(asyncio.ensure_future(custom_status(ws)))
         await send_message("1028580720655999067", f"Bot lauched")
 
     elif event_type == 'MESSAGE_CREATE':
         await handle_message(ws, event_data)
+
+    elif event_type == 'VOICE_SERVER_UPDATE':
+        print(event_data)
+        asyncio.ensure_future(handle_voice_channel(ws, event_data['token'], event_data['guild_id'], event_data['endpoint'], CURRENT_SESSION_ID, USER_ID))
+    
+    elif event_type == 'VOICE_STATE_UPDATE':
+        pass
+
+def get_header(sequence, ssrc, timestamp):
+    header = bytearray(12)
+    header[0] = 0x80
+    header[1] = 0x78
+    struct.pack_into('>H', header, 2, sequence)
+    struct.pack_into('>I', header, 4, timestamp)
+    struct.pack_into('>I', header, 8, ssrc)
+    return header
+
+def _encrypt_xsalsa20_poly1305(header, data, secret_key):
+    # nonce = header[:24]  # Extract the first 24 bytes of the header as the nonce
+    # box = SecretBox(secret_key)
+    # encrypted_data = box.encrypt(bytes(data), nonce=nonce)
+    # return header + encrypted_data.ciphertext
+    box = SecretBox(bytes(secret_key))
+    nonce = bytearray(24)
+    nonce[:12] = header
+
+    return header + box.encrypt(bytes(data), bytes(nonce)).ciphertext
+
+def get_audio_data(audio_file):
+    # with open(audio_file, "rb") as f:
+    #     return f.read()
+    stream = ffmpeg.input(audio_file)
+    stream = ffmpeg.output(stream, "pipe:", format="opus", acodec="libopus", ac=2, ar=48000, audio_bitrate="64k")
+    out, _ = ffmpeg.run(stream, capture_stdout=True)
+    return out
+
+async def send_audio_frame(udp_socket, ip_addr, port, secret_key, ssrc, frame_data, timestamp, sequence):
+    header = get_header(sequence, ssrc, timestamp)
+    encrypted_audio = _encrypt_xsalsa20_poly1305(header, frame_data, secret_key)
+    
+    udp_socket.sendto(encrypted_audio, (ip_addr, port))
+    
+async def send_audio(ws, udp_socket, ip_addr, port, secret_key, ssrc, audio_file):
+    # TODO - FIX THIS
+    # Plz help me :'(
+    audio = get_audio_data(audio_file)
+    print(len(audio))
+    frame_duration_ms = 20
+    frame_size = int(frame_duration_ms * 48)  # 48kHz sample rate, 2 channels (stereo)
+    timestamp = 0
+    sequence = 0
+    encoder_opus = opuslib.Encoder(48000, 2, opuslib.APPLICATION_AUDIO)
+
+    await send_speaking(ws, ssrc)
+    for i in range(0, len(audio), frame_size * 2):  # frame_size * 2 for 16-bit stereo audio
+        frame = audio[i:i + frame_size * 2]
+        print(len(frame))
+        frame_data = encoder_opus.encode(frame, frame_size)
+        await send_audio_frame(udp_socket, ip_addr, port, secret_key, ssrc, frame_data, timestamp, sequence)
+        await asyncio.sleep(frame_duration_ms / 1000)
+        timestamp += frame_duration_ms * 48 # Increment timestamp based on frame duration
+        sequence += 1
+        print(f"Timestamp: {timestamp} | Sequence: {sequence} | Frame size: {len(frame_data)}")
+    print("Done sending audio")
+
+
+async def handle_voice_channel(ws, token, guild_id, endpoint, session_id, user_id):
+    list_async = []
+    udp_socket = None
+    ip_addr = None
+    port = None
+    mode = "xsalsa20_poly1305"
+    secret_key = None
+    ssrc = None
+
+    try:
+        async with websockets.connect(f'wss://{endpoint}?v=4') as ws_voice:
+            print('Connected to voice gateway')
+            while ws_voice.open:
+                data = json.loads(await ws_voice.recv())
+                print(f"{get_datetime()} - {data['op']} || VOICE HANDLER")
+                print(data)
+                if data['op'] == 8:
+                    list_async.append(asyncio.ensure_future(send_heartbeat_voice(ws_voice, data['d']['heartbeat_interval'] / 1000)))
+                    await send_identify_voice(ws_voice, token, guild_id, session_id, user_id)
+                elif data['op'] == 6:
+                    print('Heartbeat Voice ACK received')
+                elif data['op'] == 5:
+                    pass
+                elif data['op'] == 2:
+                    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    udp_socket.connect((data['d']['ip'], data['d']['port']))
+                    udp_socket.setblocking(False)
+                    ip_addr = data['d']['ip']
+                    port = data['d']['port']
+                    ssrc = data['d']['ssrc']
+                    await establish_voice_udp(ws_voice, ip_addr, port, mode)
+                elif data['op'] == 4:
+                    secret_key = data['d']['secret_key']
+                    list_async.append(asyncio.ensure_future(send_audio(ws_voice, udp_socket, ip_addr, port, secret_key, ssrc, "Departures - Anata Ni Okuru Ai No Uta-29Nk3dnMUCA.opus")))
+                    
+
+    except Exception as e:
+        traceback.print_exc()
+    finally:
+        for co in list_async:
+            co.cancel()
+        asyncio.gather(*list_async)
 
 async def handle_message(ws, message_data):
     try:
