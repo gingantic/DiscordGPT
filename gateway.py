@@ -1,4 +1,5 @@
 import asyncio
+import audioop
 from dataclasses import dataclass
 import datetime
 import struct
@@ -17,6 +18,11 @@ import ffmpeg
 from pydub import AudioSegment
 import opuslib
 from nacl.secret import SecretBox
+import helper.opus as opus
+from pydub.playback import play
+
+if not opus._load_default():
+    print("Failed to load libopus")
 
 uptime = time.time()
 USERNAME_BOT = None
@@ -266,7 +272,7 @@ async def send_speaking(ws, ssrc):
         "op": 5,
         "d": {
             "speaking": 1,
-            "delay": 0,
+            "delay": 1,
             "ssrc": ssrc
         }
     }
@@ -296,6 +302,7 @@ async def handle_event(ws, event_type, event_data):
         print(USERNAME_BOT)
         ASYNCLIST.append(asyncio.ensure_future(custom_status(ws)))
         await send_message("1028580720655999067", f"Bot lauched")
+        #await join_voice_channel(ws, 1136413372393472081, 1028580720211415060)
 
     elif event_type == 'MESSAGE_CREATE':
         await handle_message(ws, event_data)
@@ -307,6 +314,13 @@ async def handle_event(ws, event_type, event_data):
     elif event_type == 'VOICE_STATE_UPDATE':
         pass
 
+def increase_volume_audio(audio_file, volume):
+    return audioop.mul(audio_file, 2, volume)
+
+def play_audio(audio_data):
+    audio_segment = AudioSegment(data=audio_data, sample_width=2, frame_rate=48000, channels=2)
+    play(audio_segment)
+
 def get_header(sequence, ssrc, timestamp):
     header = bytearray(12)
     header[0] = 0x80
@@ -316,53 +330,77 @@ def get_header(sequence, ssrc, timestamp):
     struct.pack_into('>I', header, 8, ssrc)
     return header
 
-def _encrypt_xsalsa20_poly1305(header, data, secret_key):
-    # nonce = header[:24]  # Extract the first 24 bytes of the header as the nonce
-    # box = SecretBox(secret_key)
-    # encrypted_data = box.encrypt(bytes(data), nonce=nonce)
-    # return header + encrypted_data.ciphertext
-    box = SecretBox(bytes(secret_key))
-    nonce = bytearray(24)
-    nonce[:12] = header
+def _encrypt_xsalsa20_poly1305_suffix(header: bytes, data, secret_key) -> bytes:
+        box = SecretBox(bytes(secret_key))
+        nonce = nacl.utils.random(SecretBox.NONCE_SIZE)
 
-    return header + box.encrypt(bytes(data), bytes(nonce)).ciphertext
+        return header + box.encrypt(bytes(data), nonce).ciphertext + nonce
 
 def get_audio_data(audio_file):
-    # with open(audio_file, "rb") as f:
-    #     return f.read()
     stream = ffmpeg.input(audio_file)
-    stream = ffmpeg.output(stream, "pipe:", format="opus", acodec="libopus", ac=2, ar=48000, audio_bitrate="64k")
+    stream = ffmpeg.output(stream, "pipe:", format="s16le", ac=2, ar=48000, audio_bitrate=16000)
     out, _ = ffmpeg.run(stream, capture_stdout=True)
     return out
 
 async def send_audio_frame(udp_socket, ip_addr, port, secret_key, ssrc, frame_data, timestamp, sequence):
     header = get_header(sequence, ssrc, timestamp)
-    encrypted_audio = _encrypt_xsalsa20_poly1305(header, frame_data, secret_key)
-    
+    encrypted_audio = _encrypt_xsalsa20_poly1305_suffix(header, frame_data, secret_key)
     udp_socket.sendto(encrypted_audio, (ip_addr, port))
+
+async def encode_chunks(raw_data, target_byte_size):
+    chucked = []
+    i = 0
+    opus_encoder = opus.Encoder()
+    while i < len(raw_data):
+        chunk = raw_data[i:i + target_byte_size]
+        print(f"\rEncoding chunk {i}/", end="")
+        i += target_byte_size
+
+        if len(chunk) < target_byte_size:
+            padding = b'\x00' * (target_byte_size - len(chunk))
+            chunk += padding
+
+        encoded_chunk = opus_encoder.encode(chunk, len(chunk))
+        chucked.append(encoded_chunk)
+        #chucked.append(chunk)
+    print("\rEncoding chunk success\n")
+    return chucked
     
 async def send_audio(ws, udp_socket, ip_addr, port, secret_key, ssrc, audio_file):
-    # TODO - FIX THIS
-    # Plz help me :'(
-    audio = get_audio_data(audio_file)
-    print(len(audio))
-    frame_duration_ms = 20
-    frame_size = int(frame_duration_ms * 48)  # 48kHz sample rate, 2 channels (stereo)
-    timestamp = 0
-    sequence = 0
-    encoder_opus = opuslib.Encoder(48000, 2, opuslib.APPLICATION_AUDIO)
+    # damm this thing is crazy
+    # still no sound from voice channel
+    try:
+        audio = get_audio_data(audio_file)
 
-    await send_speaking(ws, ssrc)
-    for i in range(0, len(audio), frame_size * 2):  # frame_size * 2 for 16-bit stereo audio
-        frame = audio[i:i + frame_size * 2]
-        print(len(frame))
-        frame_data = encoder_opus.encode(frame, frame_size)
-        await send_audio_frame(udp_socket, ip_addr, port, secret_key, ssrc, frame_data, timestamp, sequence)
-        await asyncio.sleep(frame_duration_ms / 1000)
-        timestamp += frame_duration_ms * 48 # Increment timestamp based on frame duration
-        sequence += 1
-        print(f"Timestamp: {timestamp} | Sequence: {sequence} | Frame size: {len(frame_data)}")
-    print("Done sending audio")
+        timestamp = 0
+        sequence = 0
+        # =
+        sample_width = 2
+        channel = 2
+        raw_data = audio 
+        sample_rate = 48000
+
+        target_duration_ms = 20
+        target_byte_size = int(sample_rate * target_duration_ms * sample_width * channel / 1000)
+        # calculated total audio duration in seconds
+        total_duration = len(raw_data) / (sample_rate * sample_width)
+        
+        data_enc = await encode_chunks(raw_data, target_byte_size)
+        await send_speaking(ws, ssrc)
+        timersasa = time.time()
+        for chunk in data_enc:
+
+            await send_audio_frame(udp_socket, ip_addr, port, secret_key, ssrc, chunk, timestamp, sequence)
+            await asyncio.sleep(target_duration_ms / 1000)
+
+            sequence += 1
+            timestamp += target_duration_ms * 48
+            cur_duration = (sequence / (sample_rate * sample_width))
+            print(f"Timestamp: {timestamp} | Sequence: {sequence} | Frame size: {len(chunk)} | Duration: {time.time()-timersasa:.2f}/{total_duration:.2f} seconds")
+
+        print("Done sending audio")
+    except Exception as e:
+        raise e
 
 
 async def handle_voice_channel(ws, token, guild_id, endpoint, session_id, user_id):
@@ -370,12 +408,12 @@ async def handle_voice_channel(ws, token, guild_id, endpoint, session_id, user_i
     udp_socket = None
     ip_addr = None
     port = None
-    mode = "xsalsa20_poly1305"
+    mode = "xsalsa20_poly1305_suffix"
     secret_key = None
     ssrc = None
-
+    audio_filename = "audio_test.mp4"
     try:
-        async with websockets.connect(f'wss://{endpoint}?v=4') as ws_voice:
+        async with websockets.connect(f'wss://{endpoint}/?v=4') as ws_voice:
             print('Connected to voice gateway')
             while ws_voice.open:
                 data = json.loads(await ws_voice.recv())
@@ -391,14 +429,14 @@ async def handle_voice_channel(ws, token, guild_id, endpoint, session_id, user_i
                 elif data['op'] == 2:
                     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                     udp_socket.connect((data['d']['ip'], data['d']['port']))
-                    udp_socket.setblocking(False)
+                    
                     ip_addr = data['d']['ip']
                     port = data['d']['port']
                     ssrc = data['d']['ssrc']
                     await establish_voice_udp(ws_voice, ip_addr, port, mode)
                 elif data['op'] == 4:
                     secret_key = data['d']['secret_key']
-                    list_async.append(asyncio.ensure_future(send_audio(ws_voice, udp_socket, ip_addr, port, secret_key, ssrc, "Departures - Anata Ni Okuru Ai No Uta-29Nk3dnMUCA.opus")))
+                    list_async.append(asyncio.ensure_future(send_audio(ws_voice, udp_socket, ip_addr, port, secret_key, ssrc, audio_filename)))
                     
 
     except Exception as e:
